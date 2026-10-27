@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Rotate now**, a button that moves Gluetun to another server on demand, with the same stop
+  and start the watcher uses. It asks for confirmation and does not wait for viewers: whoever
+  presses it has decided. The result is journalled as `rotated` or `failed` with
+  `cause: manual`, so Check status reports it like any other rotation.
+- **A country to switch to.** **Refresh countries** reads Gluetun's provider and VPN type from
+  `GET /v1/vpn/settings` and fetches that provider's list from `qdm12/gluetun-servers`, the
+  repository Gluetun's own server data comes from; the countries fill the **Country** setting
+  after a plugin reload. **Switch country** sends the choice with `PUT /v1/vpn/settings`, which
+  reconnects the tunnel there. Providers that list regions only (Private Internet Access,
+  Windscribe, VyprVPN, Giganews) get their regions instead. The list is kept in the data folder
+  with the watcher's state, so an update keeps it. The Gluetun role needs `GET` and
+  `PUT /v1/vpn/settings`.
+
 ## 0.6.0 — 2026-11-17
 
 - **Needs Dispatcharr 0.34.0.** That version runs plugin actions in a background worker, where

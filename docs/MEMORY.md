@@ -87,8 +87,25 @@ Decisions, traps and the release routine. What the plugin does for a user is in 
   leave the tunnel down until the next round. `state.is_older` and `state.started_version` are
   the same as in Could Not Dispatch and Underfed.
 
+- **The country choice goes through Gluetun's settings, not its environment** (asked for by
+  a user on 27 October 2026). `PUT /v1/vpn/settings` merges the body into the settings in
+  use, validates it against Gluetun's own server list, and stops and starts the tunnel; it
+  answers plain text, `settings left unchanged` when nothing changed. A list sent replaces the
+  one in use and `[]` clears it, so the switch clears regions, cities, hostnames, names and
+  numbers, or a `SERVER_COUNTRIES` from the compose file would combine with the choice. The
+  choice lasts until Gluetun restarts. Rotations after it stay inside the chosen country.
+- **The country list comes from GitHub**, `qdm12/gluetun-servers/main/pkg/servers/<provider>.json`,
+  the module Gluetun embeds; Gluetun keeps the same files in `/gluetun/servers/`, out of
+  Dispatcharr's reach. GitHub can be ahead of the image: a country Gluetun does not know is
+  refused with 400 and nothing moves.
+
 ## Traps
 
+- Dispatcharr reads `Plugin().fields` once, when it loads the plugin, so the country options
+  are read from `countries.json` in the data folder then, and a refreshed list shows after a
+  reload. No `context` reaches `fields`, so it reads the hub's path,
+  `/data/plugins/_data/gluetun-rotate`; a `data_dir` elsewhere would leave the list empty. A
+  reload stops the watcher, and on 0.34.0 the supervisor starts it again.
 - The API key must be an admin's: `/api/m3u/accounts/` leaves the password out for anyone else.
 - The 403 line has two shapes: with the reservoarr profile `Stream process error for channel
   <uuid>: [delaybuf] upstream error HTTPError: HTTP Error 403`, with the built-in proxy

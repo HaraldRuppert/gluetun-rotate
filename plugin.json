@@ -27,7 +27,7 @@
       "label": "Gluetun key *",
       "type": "string",
       "default": "",
-      "help_text": "An API key from Gluetun's control server auth file, for a role allowed GET /v1/publicip/ip, GET /v1/vpn/status and PUT /v1/vpn/status."
+      "help_text": "An API key from Gluetun's control server auth file, for a role allowed GET /v1/publicip/ip, GET and PUT /v1/vpn/status, and GET and PUT /v1/vpn/settings."
     },
     {
       "id": "gluetun_url",
@@ -42,6 +42,19 @@
       "type": "boolean",
       "default": false,
       "help_text": "For a provider not behind Cloudflare that refuses an exit address by resetting the connection. Off by default: a reset can also be the provider failing for everyone."
+    },
+    {
+      "id": "country",
+      "label": "Country",
+      "type": "select",
+      "default": "any",
+      "options": [
+        {
+          "value": "any",
+          "label": "Any country"
+        }
+      ],
+      "help_text": "Where Switch moves Gluetun. Press Refresh, then reload the plugins, to list your provider's countries."
     }
   ],
   "actions": [
@@ -65,6 +78,37 @@
       "description": "Asks every account now, without moving the tunnel.",
       "button_label": "Ask",
       "button_variant": "default"
+    },
+    {
+      "id": "rotate",
+      "label": "Rotate now",
+      "description": "Moves Gluetun to another VPN server right away.",
+      "button_label": "Rotate",
+      "button_variant": "default",
+      "confirm": {
+        "required": true,
+        "title": "Move to another server?",
+        "message": "Every stream through the tunnel drops for a few seconds, viewers included."
+      }
+    },
+    {
+      "id": "countries",
+      "label": "Refresh countries",
+      "description": "Fetches your provider's countries for the list above.",
+      "button_label": "Refresh",
+      "button_variant": "default"
+    },
+    {
+      "id": "switch",
+      "label": "Switch country",
+      "description": "Moves Gluetun to the country chosen above.",
+      "button_label": "Switch",
+      "button_variant": "default",
+      "confirm": {
+        "required": true,
+        "title": "Switch country?",
+        "message": "Every stream through the tunnel drops for a few seconds, viewers included."
+      }
     },
     {
       "id": "remove",
