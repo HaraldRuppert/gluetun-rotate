@@ -29,7 +29,11 @@ points to, and restart Gluetun once so it reads it, then Dispatcharr:
 ```toml
 [[roles]]
 name = "gluetun-rotate"
-routes = ["GET /v1/publicip/ip", "GET /v1/vpn/status", "PUT /v1/vpn/status"]
+routes = [
+  "GET /v1/publicip/ip",
+  "GET /v1/vpn/status", "PUT /v1/vpn/status",
+  "GET /v1/vpn/settings", "PUT /v1/vpn/settings",
+]
 auth = "apikey"
 apikey = "a-long-random-key"
 ```
@@ -46,6 +50,7 @@ both keys, press **Apply**, and press **Ask** to see what the provider answers r
 | API key | A Dispatcharr API key of an **admin** user, from Settings → Users. The watcher reads the provider accounts with it, and Dispatcharr leaves the account password out for anyone else, so those accounts would be skipped as unusable |
 | Gluetun key | The `apikey` of the role above |
 | Gluetun URL | Gluetun's control server as Dispatcharr sees it. The default fits a shared network namespace |
+| Country | Where **Switch** moves Gluetun. **Any country** clears the choice. The list stays empty until **Refresh** has run and the plugins are reloaded |
 
 ## Actions
 
@@ -54,6 +59,9 @@ both keys, press **Apply**, and press **Ask** to see what the provider answers r
 | Apply settings | Starts the watcher, or restarts it with the new settings |
 | Check status | The current exit address, the last rotation, and the journal |
 | Ask the provider | Asks every account now and reports what each answered. Nothing is moved |
+| Rotate now | Moves Gluetun to another server at once, the same stop and start the watcher uses. It does not wait for viewers, so it asks first. The result is journalled with `cause: manual` |
+| Refresh countries | Asks Gluetun which provider and VPN type it uses, then fetches that provider's server list from [qdm12/gluetun-servers](https://github.com/qdm12/gluetun-servers) and keeps its countries. Private Internet Access, Windscribe, VyprVPN and Giganews list regions instead, and the list shows those. Reload the plugins to see them, then press Apply |
+| Switch country | Sets Gluetun's server selection to the chosen country, clearing any region, city or hostname, and reports the new exit address. It does not wait for viewers, so it asks first. Journalled with `cause: switch` |
 | Restart watcher | Starts it again if it is down. Also runs by itself when a channel starts, at most once a minute |
 | Stop watcher | Stops it. The tunnel stays on whatever server it is on |
 

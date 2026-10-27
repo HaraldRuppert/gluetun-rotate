@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .gluetun_rotate import process
+    from .gluetun_rotate import process, servers
     from .gluetun_rotate import state as state_module
     from .gluetun_rotate.constants import (
+        ANY_COUNTRY,
         API_KEY_ENV,
         DEFAULT_API_URL,
         DEFAULT_GLUETUN_URL,
@@ -29,9 +30,10 @@ try:
     from .gluetun_rotate.web import ApiError
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from gluetun_rotate import process
+    from gluetun_rotate import process, servers
     from gluetun_rotate import state as state_module
     from gluetun_rotate.constants import (
+        ANY_COUNTRY,
         API_KEY_ENV,
         DEFAULT_API_URL,
         DEFAULT_GLUETUN_URL,
@@ -54,6 +56,7 @@ RUNTIME_DIR = BASE_DIR / ".runtime"
 STATE_PATH = RUNTIME_DIR / "state.json"
 JOURNAL_PATH = RUNTIME_DIR / "gluetun-rotate.jsonl"
 LOG_PATH = RUNTIME_DIR / "watcher.log"
+COUNTRIES_PATH = RUNTIME_DIR / "countries.json"
 
 DETACHING_REASONS = frozenset({"disable", "delete"})
 FAILED_EVENTS = frozenset({"failed", "api_error", "error"})
@@ -82,6 +85,17 @@ def _running_inside_uwsgi() -> bool:
     return True
 
 
+def _explained(error: ApiError) -> str:
+    text = str(error)
+    route, refused, _ = text.partition(" returned 401")
+    if not refused:
+        return text
+    return (
+        f"Gluetun refused {route} (401): add it to the plugin's role in its auth file, "
+        "then restart Gluetun so it reads the file again"
+    )
+
+
 def _as_text(value: object, fallback: str) -> str:
     text = str(value or "").strip()
     return text or fallback
@@ -93,14 +107,29 @@ class Plugin:
     description = _MANIFEST.get("description", PLUGIN_DESCRIPTION)
     author = _MANIFEST.get("author", "")
     help_url = _MANIFEST.get("help_url", "")
-    fields = _MANIFEST.get("fields", [])
     actions = _MANIFEST.get("actions", [])
+
+    @property
+    def fields(self) -> list[dict]:
+        fields = [dict(field) for field in _MANIFEST.get("fields", [])]
+        listed = state_module.load(COUNTRIES_PATH).get("countries")
+        if not isinstance(listed, list):
+            return fields
+        for field in fields:
+            if field.get("id") == "country":
+                field["options"] = [*field.get("options", [])] + [
+                    {"value": country, "label": country} for country in listed
+                ]
+        return fields
 
     def run(self, action: str, params: dict, context: dict) -> dict:
         handlers = {
             "apply": self._apply,
             "status": self._status,
             "test": self._test,
+            "rotate": self._rotate,
+            "countries": self._countries,
+            "switch": self._switch,
             "restart": self._restart,
             "remove": self._remove,
         }
@@ -109,6 +138,9 @@ class Plugin:
             return {"status": "error", "message": f"Unknown action '{action}'."}
         try:
             return handler(dict(context or {}))
+        except ApiError as error:
+            logger.warning("Gluetun Rotate action '%s' failed: %s", action, error)
+            return {"status": "error", "message": f"{_explained(error)}."}
         except Exception as exc:
             logger.exception("Gluetun Rotate action '%s' failed", action)
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
@@ -198,6 +230,125 @@ class Plugin:
             "refused": any(result.refused for result in results),
         }
 
+    def _rotate(self, context: dict) -> dict:
+        settings = dict(context.get("settings") or {})
+        gluetun = self._gluetun(settings)
+        if gluetun is None:
+            return {"status": "error", "message": "A Gluetun control server key is required."}
+        journal = Journal(JOURNAL_PATH, MAX_RECENT_EVENTS)
+        try:
+            rotation = gluetun.rotate()
+        except ApiError as error:
+            journal.write("failed", cause="manual", detail=str(error))
+            return {"status": "error", "message": f"Gluetun did not rotate: {_explained(error)}."}
+        if not rotation.moved:
+            journal.write(
+                "failed",
+                cause="manual",
+                detail="the exit address did not change",
+                before=rotation.before,
+                after=rotation.after,
+                stop_confirmed=rotation.stop_confirmed,
+            )
+            return {
+                "status": "error",
+                "message": f"The address did not change: still {rotation.before or 'unknown'}.",
+            }
+        journal.write(
+            "rotated",
+            cause="manual",
+            before=rotation.before,
+            after=rotation.after,
+            stop_confirmed=rotation.stop_confirmed,
+        )
+        return {
+            "status": "ok",
+            "message": f"Moved from {rotation.before or 'unknown'} to {rotation.after}.",
+            "before": rotation.before,
+            "after": rotation.after,
+        }
+
+    def _countries(self, context: dict) -> dict:
+        settings = dict(context.get("settings") or {})
+        gluetun = self._gluetun(settings)
+        if gluetun is None:
+            return {"status": "error", "message": "A Gluetun control server key is required."}
+        vpn = gluetun.vpn_settings()
+        provider = _as_text((vpn.get("provider") or {}).get("name"), "")
+        vpn_type = _as_text(vpn.get("type"), "")
+        if not provider:
+            return {"status": "error", "message": "Gluetun did not name its VPN provider."}
+        selection, listed = servers.locations(provider, vpn_type)
+        if not listed:
+            return {
+                "status": "error",
+                "message": f"The server list for {provider} names no country or region.",
+            }
+        state_module.save(
+            COUNTRIES_PATH,
+            {
+                "provider": provider,
+                "vpn": vpn_type,
+                "selection": selection,
+                "countries": listed,
+                "at": time.time(),
+            },
+        )
+        return {
+            "status": "ok",
+            "message": (
+                f"{len(listed)} {selection} for {provider} ({vpn_type or 'any VPN type'}). "
+                "Reload the plugins to see them in the list, then press Apply again."
+            ),
+            "countries": listed,
+        }
+
+    def _switch(self, context: dict) -> dict:
+        settings = dict(context.get("settings") or {})
+        gluetun = self._gluetun(settings)
+        if gluetun is None:
+            return {"status": "error", "message": "A Gluetun control server key is required."}
+        country = _as_text(settings.get("country"), ANY_COUNTRY)
+        chosen = "any country" if country == ANY_COUNTRY else country
+        selection = _as_text(state_module.load(COUNTRIES_PATH).get("selection"), "countries")
+        journal = Journal(JOURNAL_PATH, MAX_RECENT_EVENTS)
+        try:
+            rotation = gluetun.select_location(
+                selection, [] if country == ANY_COUNTRY else [country]
+            )
+        except ApiError as error:
+            journal.write("failed", cause="switch", country=chosen, detail=str(error))
+            return {
+                "status": "error",
+                "message": f"Gluetun did not switch to {chosen}: {_explained(error)}.",
+            }
+        if rotation is None:
+            return {"status": "ok", "message": f"Gluetun is already on {chosen}."}
+        if not rotation.moved:
+            journal.write(
+                "failed",
+                cause="switch",
+                country=chosen,
+                detail="the exit address did not change",
+                before=rotation.before,
+                after=rotation.after,
+            )
+            return {
+                "status": "error",
+                "message": f"Gluetun took {chosen} but the exit address did not change.",
+            }
+        journal.write(
+            "rotated", cause="switch", country=chosen, before=rotation.before, after=rotation.after
+        )
+        return {
+            "status": "ok",
+            "message": (
+                f"Moved to {chosen}: {rotation.before or 'unknown'} to {rotation.after}."
+            ),
+            "before": rotation.before,
+            "after": rotation.after,
+        }
+
     def _restart(self, context: dict) -> dict:
         settings = dict(context.get("settings") or {})
         state = self._state()
@@ -242,6 +393,10 @@ class Plugin:
         except ApiError as error:
             return f"Gluetun did not answer: {error}."
         return f"Exit address {address}." if address else ""
+
+    def _gluetun(self, settings: dict) -> Gluetun | None:
+        key = _as_text(settings.get("gluetun_api_key"), "")
+        return Gluetun(self._gluetun_url(settings), key) if key else None
 
     def _gluetun_url(self, settings: dict) -> str:
         return _as_text(settings.get("gluetun_url"), DEFAULT_GLUETUN_URL)

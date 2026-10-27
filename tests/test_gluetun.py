@@ -153,3 +153,65 @@ def test_a_network_failure_never_repeats_the_address_it_was_sent_to(monkeypatch)
         fetch("http://provider/player_api.php?username=u&password=secret")
     assert "secret" not in str(caught.value)
     assert "timed out" in str(caught.value)
+
+
+class SettingsGluetun(FakeGluetun):
+    def __init__(self, addresses: list[str], outcome: str = "running", status: int = 200):
+        super().__init__(addresses)
+        self.outcome = outcome
+        self.put_status = status
+        self.settings_puts: list[object] = []
+
+    def _put_settings(self, body: dict[str, object]) -> str:
+        self.settings_puts.append(body)
+        if self.put_status != 200:
+            raise ApiError(f"PUT /v1/vpn/settings returned {self.put_status} bad country")
+        return self.outcome
+
+
+def test_choosing_a_country_clears_the_narrower_selections_and_reports_the_new_address():
+    gluetun = SettingsGluetun(["1.1.1.1", "1.1.1.1", "2.2.2.2"])
+    assert gluetun.select_location("countries", ["Germany"]) == Rotation("1.1.1.1", "2.2.2.2")
+    selection = gluetun.settings_puts[0]["provider"]["server_selection"]  # type: ignore[index]
+    assert selection == {
+        "countries": ["Germany"],
+        "regions": [],
+        "cities": [],
+        "hostnames": [],
+        "names": [],
+        "numbers": [],
+    }
+
+
+def test_choosing_the_country_already_set_moves_nothing():
+    gluetun = SettingsGluetun(["1.1.1.1"], outcome="settings left unchanged")
+    assert gluetun.select_location("countries", ["Germany"]) is None
+
+
+def test_choosing_a_region_clears_the_countries():
+    gluetun = SettingsGluetun(["1.1.1.1", "2.2.2.2"])
+    gluetun.select_location("regions", ["DE Frankfurt"])
+    selection = gluetun.settings_puts[0]["provider"]["server_selection"]  # type: ignore[index]
+    assert selection["regions"] == ["DE Frankfurt"]
+    assert selection["countries"] == []
+
+
+def test_a_country_gluetun_refuses_raises():
+    gluetun = SettingsGluetun(["1.1.1.1"], status=400)
+    with pytest.raises(ApiError, match="400"):
+        gluetun.select_location("countries", ["Atlantis"])
+
+
+def test_the_settings_answer_is_plain_text_not_json(monkeypatch):
+    seen = {}
+
+    def answer(url, method="GET", headers=None, body=None, timeout=0.0):
+        seen.update(url=url, method=method, headers=headers, body=body)
+        return web.Response(status=200, body=b"settings left unchanged")
+
+    monkeypatch.setattr("gluetun_rotate.gluetun.fetch", answer)
+    gluetun = Gluetun("http://127.0.0.1:8000/", "key")
+    assert gluetun._put_settings({"provider": {}}) == "settings left unchanged"
+    assert seen["url"] == "http://127.0.0.1:8000/v1/vpn/settings"
+    assert seen["method"] == "PUT"
+    assert seen["headers"] == {"X-API-Key": "key"}

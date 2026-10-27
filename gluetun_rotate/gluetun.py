@@ -5,9 +5,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .constants import GLUETUN_POLL_SECONDS, NEW_ADDRESS_TIMEOUT_SECONDS, VPN_STOP_TIMEOUT_SECONDS
-from .web import ApiError, request_json
+from .web import ApiError, fetch, request_json
 
 RESTART_ATTEMPTS = 3
+SETTINGS_UNCHANGED = "settings left unchanged"
+LOCATION_SELECTIONS = ("countries", "regions", "cities", "hostnames", "names", "numbers")
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,19 @@ class Gluetun:
 
     def set_vpn(self, status: str) -> None:
         self._call("PUT", "/v1/vpn/status", {"status": status})
+
+    def vpn_settings(self) -> dict:
+        payload = self._call("GET", "/v1/vpn/settings")
+        return payload if isinstance(payload, dict) else {}
+
+    def select_location(self, selection: str, names: list[str]) -> Rotation | None:
+        before = self.public_ip()
+        chosen: dict[str, object] = {name: [] for name in LOCATION_SELECTIONS}
+        chosen[selection] = names
+        outcome = self._put_settings({"provider": {"server_selection": chosen}})
+        if outcome == SETTINGS_UNCHANGED:
+            return None
+        return Rotation(before=before, after=self._wait_for_new_address(before))
 
     def rotate(self) -> Rotation:
         before = self.public_ip()
@@ -109,3 +124,19 @@ class Gluetun:
         return request_json(
             self.base_url, path, method, headers={"X-API-Key": self.api_key}, body=body
         )
+
+    def _put_settings(self, body: dict[str, object]) -> str:
+        path = "/v1/vpn/settings"
+        try:
+            response = fetch(
+                f"{self.base_url.rstrip('/')}{path}",
+                "PUT",
+                headers={"X-API-Key": self.api_key},
+                body=body,
+            )
+        except ApiError as error:
+            raise ApiError(f"PUT {path} failed: {error}") from error
+        text = response.body.decode("utf-8", "ignore").strip()
+        if not 200 <= response.status < 300:
+            raise ApiError(f"PUT {path} returned {response.status} {text}".strip())
+        return text

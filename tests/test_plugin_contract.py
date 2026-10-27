@@ -199,3 +199,131 @@ def test_the_keys_reach_the_watcher_through_its_environment_not_its_command_line
     assert "dispatcharr-secret" not in arguments
     assert "gluetun-secret" not in arguments
     assert arguments[arguments.index("--gluetun-url") + 1] == "http://127.0.0.1:8000"
+
+
+def test_rotating_without_the_gluetun_key_says_so(loaded_module, isolated_runtime):
+    result = loaded_module.Plugin().run("rotate", {}, {"settings": {}})
+    assert result["status"] == "error"
+    assert "Gluetun" in result["message"]
+
+
+def test_rotating_by_hand_moves_the_tunnel_and_journals_it(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    rotation = sys.modules[loaded_module.Gluetun.__module__].Rotation("1.1.1.1", "2.2.2.2")
+    monkeypatch.setattr(loaded_module.Gluetun, "rotate", lambda self: rotation)
+    result = loaded_module.Plugin().run("rotate", {}, {"settings": {"gluetun_api_key": "g"}})
+    assert result["status"] == "ok"
+    assert "1.1.1.1 to 2.2.2.2" in result["message"]
+    records = loaded_module.Journal(loaded_module.JOURNAL_PATH, 50).read()
+    assert records[-1]["event"] == "rotated"
+    assert records[-1]["cause"] == "manual"
+
+
+def test_a_manual_rotation_that_keeps_the_address_is_an_error(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    rotation = sys.modules[loaded_module.Gluetun.__module__].Rotation("1.1.1.1", "1.1.1.1")
+    monkeypatch.setattr(loaded_module.Gluetun, "rotate", lambda self: rotation)
+    result = loaded_module.Plugin().run("rotate", {}, {"settings": {"gluetun_api_key": "g"}})
+    assert result["status"] == "error"
+    records = loaded_module.Journal(loaded_module.JOURNAL_PATH, 50).read()
+    assert records[-1]["event"] == "failed"
+
+
+def test_refreshed_countries_join_the_country_options(loaded_module, isolated_runtime, monkeypatch):
+    monkeypatch.setattr(loaded_module, "COUNTRIES_PATH", isolated_runtime / "countries.json")
+    loaded_module.state_module.save(
+        loaded_module.COUNTRIES_PATH, {"countries": ["Germany", "Italy"]}
+    )
+    field = next(f for f in loaded_module.Plugin().fields if f["id"] == "country")
+    assert [option["value"] for option in field["options"]] == ["any", "Germany", "Italy"]
+
+
+def test_refreshing_countries_asks_gluetun_for_its_provider(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    monkeypatch.setattr(loaded_module, "COUNTRIES_PATH", isolated_runtime / "countries.json")
+    monkeypatch.setattr(
+        loaded_module.Gluetun,
+        "vpn_settings",
+        lambda self: {"type": "openvpn", "provider": {"name": "surfshark"}},
+    )
+    asked = []
+    monkeypatch.setattr(
+        loaded_module.servers,
+        "locations",
+        lambda provider, vpn_type: asked.append((provider, vpn_type)) or ("countries", ["Germany"]),
+    )
+    result = loaded_module.Plugin().run("countries", {}, {"settings": {"gluetun_api_key": "g"}})
+    assert result["status"] == "ok"
+    assert asked == [("surfshark", "openvpn")]
+    stored = loaded_module.state_module.load(loaded_module.COUNTRIES_PATH)
+    assert stored["countries"] == ["Germany"]
+
+
+def test_switching_to_any_country_clears_the_country_selection(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    chosen = []
+    rotation = sys.modules[loaded_module.Gluetun.__module__].Rotation("1.1.1.1", "2.2.2.2")
+    monkeypatch.setattr(
+        loaded_module.Gluetun,
+        "select_location",
+        lambda self, selection, names: chosen.append((selection, names)) or rotation,
+    )
+    settings = {"gluetun_api_key": "g", "country": "any"}
+    result = loaded_module.Plugin().run("switch", {}, {"settings": settings})
+    assert result["status"] == "ok"
+    assert chosen == [("countries", [])]
+
+
+def test_switching_journals_the_country(loaded_module, isolated_runtime, monkeypatch):
+    rotation = sys.modules[loaded_module.Gluetun.__module__].Rotation("1.1.1.1", "2.2.2.2")
+    monkeypatch.setattr(loaded_module.Gluetun, "select_location", lambda self, s, n: rotation)
+    settings = {"gluetun_api_key": "g", "country": "Germany"}
+    result = loaded_module.Plugin().run("switch", {}, {"settings": settings})
+    assert "Germany" in result["message"]
+    record = loaded_module.Journal(loaded_module.JOURNAL_PATH, 50).read()[-1]
+    assert (record["event"], record["cause"], record["country"]) == ("rotated", "switch", "Germany")
+
+
+def test_switching_to_the_country_already_set_is_not_an_error(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    monkeypatch.setattr(loaded_module.Gluetun, "select_location", lambda self, s, n: None)
+    settings = {"gluetun_api_key": "g", "country": "Germany"}
+    result = loaded_module.Plugin().run("switch", {}, {"settings": settings})
+    assert result["status"] == "ok"
+    assert "already" in result["message"]
+
+
+def test_switching_on_a_regions_provider_selects_the_region(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    monkeypatch.setattr(loaded_module, "COUNTRIES_PATH", isolated_runtime / "countries.json")
+    loaded_module.state_module.save(
+        loaded_module.COUNTRIES_PATH, {"selection": "regions", "countries": ["DE Frankfurt"]}
+    )
+    chosen = []
+    monkeypatch.setattr(
+        loaded_module.Gluetun,
+        "select_location",
+        lambda self, selection, names: chosen.append((selection, names)),
+    )
+    settings = {"gluetun_api_key": "g", "country": "DE Frankfurt"}
+    loaded_module.Plugin().run("switch", {}, {"settings": settings})
+    assert chosen == [("regions", ["DE Frankfurt"])]
+
+
+def test_a_route_missing_from_the_gluetun_role_is_named(
+    loaded_module, isolated_runtime, monkeypatch
+):
+    def refused(self):
+        raise loaded_module.ApiError("GET /v1/vpn/settings returned 401 Unauthorized")
+
+    monkeypatch.setattr(loaded_module.Gluetun, "vpn_settings", refused)
+    result = loaded_module.Plugin().run("countries", {}, {"settings": {"gluetun_api_key": "g"}})
+    assert result["status"] == "error"
+    assert "GET /v1/vpn/settings" in result["message"]
+    assert "restart Gluetun" in result["message"]
